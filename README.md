@@ -77,7 +77,7 @@ Group chat behavior:
 Image handling:
 
 - when an incoming message contains an image, the plugin prefers `almaVisionModel` if configured
-- the first image is resolved via NapCat and downloaded to a local cache path before sending to Alma
+- the first image is resolved via NapCat, cached locally, and then sent to Alma as a Base64 `file` part with `mediaType`
 - if `almaVisionModel` is empty, the plugin replies with a fixed "看不到图" style fallback message instead of attempting OCR
 
 Current runtime sends and receives through WebSocket only.
@@ -103,6 +103,46 @@ NapCat authentication uses the WebSocket URL query style, for example:
 ```text
 ws://127.0.0.1:6099/ws?access_token=your-token
 ```
+
+## Alma WS Requirements
+
+The plugin talks to Alma through `ws://127.0.0.1:23001/ws/threads` using `generate_response`.
+
+Minimum request shape:
+
+```json
+{
+  "type": "generate_response",
+  "data": {
+    "threadId": "a real Alma thread id",
+    "userMessage": {
+      "role": "user",
+      "parts": [
+        { "type": "text", "text": "hello" }
+      ]
+    },
+    "model": "provider_id:model_id"
+  }
+}
+```
+
+Important Alma-side requirements:
+
+- all request fields must be wrapped inside `data`
+- `threadId` must already exist in Alma
+- `userMessage.role` must be `user`
+- `userMessage.parts` must be an array
+- multimodal image input should be sent as a `file` part with a `data:image/...;base64,...` URL and `mediaType`
+- `model` can be omitted if Alma should fall back to its default model, but this plugin sends it explicitly
+
+`Invalid message format` from `/ws/threads` is misleading. Alma currently wraps the whole `generateChatResponse(...)` path in a broad `try-catch`, so this same error can also mean:
+
+- the `threadId` does not exist
+- the message failed validation deeper in the generation pipeline
+- database insertion failed
+- the selected model/provider failed internally
+
+If the payload shape already matches the example above, check the Alma app's server-side console output for the real exception. The backend logs it as `WebSocket message error: ...` before returning the generic WS error.
 
 ## Thread Reuse
 
