@@ -9,10 +9,11 @@ export const STORAGE_KEYS = {
 } as const;
 
 export const DEBUG_LOG_PATH = '/tmp/alma-plugin-napcat-qq.log';
+export const PLUGIN_ID = 'channel-napcat-qq';
 export const ALMA_THREAD_WS_URL = 'ws://127.0.0.1:23001/ws/threads';
-export const SETTINGS_SECTION_ID = 'channel-napcat-qq.runtime';
-export const STATUS_BAR_ID = 'channel-napcat-qq.status';
-export const SIDEBAR_VIEW_ID = 'channel-napcat-qq.runtime-status';
+export const SETTINGS_SECTION_ID = `${PLUGIN_ID}.runtime`;
+export const STATUS_BAR_ID = `${PLUGIN_ID}.status`;
+export const SIDEBAR_VIEW_ID = `${PLUGIN_ID}.runtime-status`;
 export const RECONNECT_BASE_DELAY_MS = 1000;
 export const RECONNECT_MAX_DELAY_MS = 30000;
 export const ALMA_THREAD_CREATE_TIMEOUT_MS = 10000;

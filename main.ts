@@ -53,6 +53,7 @@ import {
   MAX_HISTORY_SIZE,
   MAX_MESSAGE_INDEX_SIZE,
   MESSAGE_DEDUP_WINDOW_MS,
+  PLUGIN_ID,
   RECONNECT_BASE_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   SETTINGS_SECTION_ID,
@@ -809,7 +810,7 @@ function getImageFallbackReply(parsedMessage: ParsedMessage): string | null {
 }
 
 function getAlmaRequestSource(parsedMessage: ParsedMessage): string {
-  return parsedMessage.messageType === 'group' ? 'telegram-group' : 'discord';
+  return PLUGIN_ID;
 }
 
 async function sendReplyToParsedMessage(

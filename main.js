@@ -16590,10 +16590,11 @@ var STORAGE_KEYS = {
   messageIndex: "qqchannel.messageIndex"
 };
 var DEBUG_LOG_PATH = "/tmp/alma-plugin-napcat-qq.log";
+var PLUGIN_ID = "channel-napcat-qq";
 var ALMA_THREAD_WS_URL = "ws://127.0.0.1:23001/ws/threads";
-var SETTINGS_SECTION_ID = "channel-napcat-qq.runtime";
-var STATUS_BAR_ID = "channel-napcat-qq.status";
-var SIDEBAR_VIEW_ID = "channel-napcat-qq.runtime-status";
+var SETTINGS_SECTION_ID = `${PLUGIN_ID}.runtime`;
+var STATUS_BAR_ID = `${PLUGIN_ID}.status`;
+var SIDEBAR_VIEW_ID = `${PLUGIN_ID}.runtime-status`;
 var RECONNECT_BASE_DELAY_MS = 1000;
 var RECONNECT_MAX_DELAY_MS = 30000;
 var ALMA_THREAD_CREATE_TIMEOUT_MS = 1e4;
@@ -18170,7 +18171,7 @@ function getImageFallbackReply2(parsedMessage) {
   return getImageFallbackReply(parsedMessage, getEffectiveConfig(config2, parsedMessage.groupId));
 }
 function getAlmaRequestSource(parsedMessage) {
-  return parsedMessage.messageType === "group" ? "telegram-group" : "discord";
+  return PLUGIN_ID;
 }
 async function sendReplyToParsedMessage(parsedMessage, reply, options) {
   let atUser;
