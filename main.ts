@@ -1251,7 +1251,11 @@ async function connectWebSocket(): Promise<void> {
               } catch (error) {
                 pluginContext.logger.error('Failed to generate Alma response', {
                   threadId: parsedMessage.threadInfo.threadId,
-                  error,
+                  error: error instanceof Error ? {
+                    name: error.name,
+                    message: error.message,
+                    stack: error.stack,
+                  } : error,
                 });
                 reply = buildErrorReply(error);
               }
@@ -1499,7 +1503,6 @@ async function requestAlmaResponse(
                 role: 'user',
                 parts: userMessageParts,
               },
-              source: 'qq',
             },
           };
 

@@ -18517,7 +18517,11 @@ async function connectWebSocket() {
               } catch (error48) {
                 pluginContext.logger.error("Failed to generate Alma response", {
                   threadId: parsedMessage.threadInfo.threadId,
-                  error: error48
+                  error: error48 instanceof Error ? {
+                    name: error48.name,
+                    message: error48.message,
+                    stack: error48.stack
+                  } : error48
                 });
                 reply = buildErrorReply2(error48);
               }
@@ -18703,8 +18707,7 @@ async function requestAlmaResponse(parsedMessage, almaThreadId) {
               userMessage: {
                 role: "user",
                 parts: userMessageParts
-              },
-              source: "qq"
+              }
             }
           };
           writeDebugLog2("INFO", "Requesting Alma reply", {
