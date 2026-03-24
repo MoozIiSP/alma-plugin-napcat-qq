@@ -336,6 +336,13 @@ export class ThreadManager {
     }
   }
 
+  clearAlmaThreadId(threadId: string): void {
+    const thread = this.threads.get(threadId);
+    if (thread) {
+      thread.almaThreadId = undefined;
+    }
+  }
+
   /**
    * Remove a thread
    * @param threadId - Thread ID to remove

@@ -194,6 +194,8 @@ export function isTaskLikeRequest(parsedMessage: any): boolean {
 }
 
 export function getAlmaResponseTimeoutMs(parsedMessage: any): number {
+  // Plain chat can still be slow on some providers, but tool/image paths are usually slower.
+  // Keep timeout selection centralized so transport code stays simple.
   if (isTaskLikeRequest(parsedMessage)) {
     return ALMA_TASK_RESPONSE_TIMEOUT_MS;
   }

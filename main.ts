@@ -43,9 +43,11 @@ import {
   ALMA_VISION_RESPONSE_TIMEOUT_MS,
   DEBUG_LOG_PATH,
   GROUP_CONTEXT_CHAR_LIMIT,
+  GROUP_CONTEXT_LOOKBACK_SECONDS,
   GROUP_CONTEXT_MESSAGE_LIMIT,
   GROUP_NO_REPLY_SENTINEL,
   GROUP_OPEN_REPLY_MAX_LENGTH,
+  GROUP_OPEN_REPLY_POLL_MS,
   GROUP_REPLY_DELAY_JITTER_MS,
   GROUP_REPLY_DELAY_MENTION_MS,
   GROUP_REPLY_DELAY_OPEN_MS,
@@ -121,7 +123,7 @@ import {
 } from './src/messages/reply-logic';
 import {
   createAlmaThread as createAlmaThreadBase,
-  getAlmaApiBaseUrl,
+  listAlmaThreads as listAlmaThreadsBase,
   type AlmaThreadRecord,
 } from './src/alma/client';
 
@@ -198,6 +200,7 @@ interface ParsedMessage {
   threadInfo: ThreadInfo;
   threadContext: ThreadContext;
   isReplyToBot: boolean;
+  batchMessages?: ParsedMessage[];
 }
 
 interface PersistedMessageIndexEntry {
@@ -244,6 +247,10 @@ const pendingRequests = new Map<
 // Rate limiting state
 const rateLimitMap = new Map<string, number[]>(); // userId -> timestamps
 const atCooldownMap = new Map<string, number>(); // userId -> last reply timestamp
+const pendingGroupReplyPolls = new Map<string, {
+  timer: ReturnType<typeof setTimeout>;
+  messages: ParsedMessage[];
+}>();
 
 // Message history for context
 const messageHistory: ParsedMessage[] = [];
@@ -636,14 +643,24 @@ function getSenderLabel(message: Pick<ParsedMessage, 'senderName' | 'userId' | '
   return getSenderLabelFromMessage(message);
 }
 
+function formatBatchMessageEntry(message: ParsedMessage): string {
+  const senderLabel = getSenderLabel(message);
+  return `[${senderLabel} ${message.userId}] ${message.textContent}`.trim();
+}
+
 function buildGroupHistoryContext(parsedMessage: ParsedMessage): string {
   const effectiveConfig = getEffectiveConfig(config, parsedMessage.groupId);
   const historyLimit = Math.max(1, effectiveConfig.groupContextMessageLimit || GROUP_CONTEXT_MESSAGE_LIMIT);
   const charLimit = Math.max(500, effectiveConfig.groupContextCharLimit || GROUP_CONTEXT_CHAR_LIMIT);
+  const excludeMessageIds = parsedMessage.batchMessages
+    ? new Set(parsedMessage.batchMessages.map(message => message.messageId))
+    : undefined;
   return buildGroupHistoryContextFromMessages(parsedMessage, {
     historyLimit,
     charLimit,
-    getMessageHistory: (groupId, limit) => getMessageHistory(groupId, limit),
+    lookbackSeconds: GROUP_CONTEXT_LOOKBACK_SECONDS,
+    excludeMessageIds,
+    getMessageHistory: (groupId, limit, beforeTimestamp) => getMessageHistory(groupId, limit, beforeTimestamp),
   });
 }
 
@@ -666,11 +683,18 @@ function buildAlmaInputText(parsedMessage: ParsedMessage): string {
     return imageAwareText;
   }
 
-  const senderLabel = getSenderLabel(parsedMessage);
-  const currentMessage = [
-    '当前需要回复的消息：',
-    `[${senderLabel} ${parsedMessage.userId}] ${hasImages ? imageAwareText : parsedMessage.textContent}`,
-  ].join('\n');
+  const batchMessages = parsedMessage.batchMessages?.length
+    ? parsedMessage.batchMessages
+    : [parsedMessage];
+  const currentMessage = batchMessages.length > 1
+    ? [
+        '当前周期内的新消息：',
+        ...batchMessages.map(formatBatchMessageEntry),
+      ].join('\n')
+    : [
+        '当前需要回复的消息：',
+        `[${getSenderLabel(parsedMessage)} ${parsedMessage.userId}] ${hasImages ? imageAwareText : parsedMessage.textContent}`,
+      ].join('\n');
 
   if (!effectiveConfig.respondToGroupMessage) {
     return currentMessage;
@@ -807,10 +831,6 @@ function normalizeGeneratedReply(parsedMessage: ParsedMessage, reply: string | n
 
 function getImageFallbackReply(parsedMessage: ParsedMessage): string | null {
   return getImageFallbackReplyBase(parsedMessage, getEffectiveConfig(config, parsedMessage.groupId));
-}
-
-function getAlmaRequestSource(parsedMessage: ParsedMessage): string {
-  return PLUGIN_ID;
 }
 
 async function sendReplyToParsedMessage(
@@ -1050,16 +1070,91 @@ async function createAlmaThread(title: string): Promise<AlmaThreadRecord> {
   });
 }
 
+async function listAlmaThreads(limit: number): Promise<AlmaThreadRecord[]> {
+  return listAlmaThreadsBase(limit, {
+    writeDebugLog,
+    logger: pluginContext.logger,
+  });
+}
+
+function buildAlmaThreadTitle(parsedMessage: ParsedMessage): string {
+  // Use a stable, machine-readable title so QQ->Alma mapping does not depend on nicknames.
+  return `qq ${parsedMessage.messageType} ${parsedMessage.messageType === 'group' ? parsedMessage.groupId : parsedMessage.userId}`;
+}
+
+function matchesAlmaThreadTitle(parsedMessage: ParsedMessage, title?: string): boolean {
+  const normalizedTitle = title?.trim();
+  if (!normalizedTitle) {
+    return false;
+  }
+
+  // Keep backward compatibility with threads created before the stable title format existed.
+  if (normalizedTitle === parsedMessage.threadInfo.displayName.trim()) {
+    return true;
+  }
+
+  return normalizedTitle === buildAlmaThreadTitle(parsedMessage);
+}
+
+async function validateMappedAlmaThread(parsedMessage: ParsedMessage, almaThreadId: string): Promise<boolean> {
+  // Local storage can survive app/plugin restarts and occasionally retain a stale Alma thread id.
+  // Re-validate against Alma's own thread metadata before we reuse that mapping.
+  const threads = await listAlmaThreads(200);
+  const matchedThread = threads.find(thread => thread.id === almaThreadId);
+
+  if (!matchedThread) {
+    writeDebugLog('WARN', 'Mapped Alma thread was not found in recent thread list', {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+    });
+    return false;
+  }
+
+  const valid = matchesAlmaThreadTitle(parsedMessage, matchedThread.title);
+  if (!valid) {
+    writeDebugLog('WARN', 'Mapped Alma thread title did not match QQ thread', {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+      almaTitle: matchedThread.title,
+      expectedTitle: buildAlmaThreadTitle(parsedMessage),
+    });
+  }
+
+  return valid;
+}
+
 async function ensureAlmaThreadId(parsedMessage: ParsedMessage): Promise<string> {
   const thread = threadManager.get(parsedMessage.threadInfo.threadId);
   if (thread?.almaThreadId) {
-    return thread.almaThreadId;
+    const valid = await validateMappedAlmaThread(parsedMessage, thread.almaThreadId);
+    if (valid) {
+      return thread.almaThreadId;
+    }
+
+    // Drop the poisoned mapping immediately so the current request rebuilds a clean thread.
+    await resetAlmaThreadId(parsedMessage);
   }
 
-  const created = await createAlmaThread(parsedMessage.threadInfo.displayName);
+  const created = await createAlmaThread(buildAlmaThreadTitle(parsedMessage));
   threadManager.setAlmaThreadId(parsedMessage.threadInfo.threadId, created.id);
   schedulePersist();
   return created.id;
+}
+
+async function resetAlmaThreadId(parsedMessage: ParsedMessage): Promise<void> {
+  threadManager.clearAlmaThreadId(parsedMessage.threadInfo.threadId);
+  schedulePersist();
+}
+
+function shouldRetryWithFreshAlmaThread(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.trim().toLowerCase();
+  return message.includes('invalid message format')
+    || message.includes('thread')
+    || message.includes('not found');
 }
 
 function findReplyTarget(replyToMessageId?: number): PersistedMessageIndexEntry | undefined {
@@ -1070,12 +1165,111 @@ function findReplyTarget(replyToMessageId?: number): PersistedMessageIndexEntry 
   return messageIndex.get(replyToMessageId);
 }
 
-function getMessageHistory(groupId?: string, limit: number = 10): ParsedMessage[] {
+function getMessageHistory(groupId?: string, limit: number = 10, beforeTimestamp?: number): ParsedMessage[] {
   let filtered = messageHistory;
   if (groupId) {
     filtered = messageHistory.filter(m => m.groupId === groupId);
   }
+  if (beforeTimestamp !== undefined) {
+    filtered = filtered.filter(m => m.timestamp <= beforeTimestamp);
+  }
   return filtered.slice(-limit);
+}
+
+function isExplicitGroupTrigger(parsedMessage: ParsedMessage): boolean {
+  return parsedMessage.isAtBot
+    || parsedMessage.triggerTypes.includes(TriggerType.REPLY_TO_BOT)
+    || parsedMessage.triggerTypes.includes(TriggerType.COMMAND_PREFIX);
+}
+
+async function processModelReplyForMessage(parsedMessage: ParsedMessage): Promise<void> {
+  let reply: string | null = null;
+
+  try {
+    reply = getImageFallbackReply(parsedMessage);
+    if (!reply) {
+      reply = normalizeGeneratedReply(parsedMessage, await generateAlmaResponse(parsedMessage));
+    }
+    if (!reply && !config.respondToGroupMessage) {
+      reply = generateReply(parsedMessage);
+    }
+  } catch (error) {
+    pluginContext.logger.error('Failed to generate Alma response', {
+      threadId: parsedMessage.threadInfo.threadId,
+      error: error instanceof Error ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      } : error,
+    });
+    reply = buildErrorReply(error);
+  }
+
+  if (!reply) {
+    return;
+  }
+
+  const strategy = buildReplyStrategy(parsedMessage, reply);
+  if (strategy.delayMs > 0) {
+    await sleep(strategy.delayMs);
+  }
+
+  await sendReplyToParsedMessage(parsedMessage, strategy.text, {
+    mentionSender: strategy.mentionSender,
+    quoteMessageId: strategy.quoteMessageId,
+  });
+}
+
+function scheduleOpenGroupReplyPoll(parsedMessage: ParsedMessage): void {
+  if (!parsedMessage.groupId) {
+    return;
+  }
+
+  const existing = pendingGroupReplyPolls.get(parsedMessage.groupId);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.messages.push(parsedMessage);
+    const timer = setTimeout(() => {
+      pendingGroupReplyPolls.delete(parsedMessage.groupId!);
+      const batchedMessages = existing.messages
+        .sort((a, b) => a.timestamp - b.timestamp || a.messageId - b.messageId);
+      const latestMessage = batchedMessages[batchedMessages.length - 1];
+      const aggregatedMessage: ParsedMessage = {
+        ...latestMessage,
+        batchMessages: batchedMessages,
+      };
+      void processModelReplyForMessage(aggregatedMessage).catch(error => {
+        pluginContext.logger.error('Failed to process scheduled group reply', {
+          threadId: latestMessage.threadInfo.threadId,
+          error,
+        });
+      });
+    }, GROUP_OPEN_REPLY_POLL_MS);
+    pendingGroupReplyPolls.set(parsedMessage.groupId, {
+      timer,
+      messages: existing.messages,
+    });
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    pendingGroupReplyPolls.delete(parsedMessage.groupId!);
+    const aggregatedMessage: ParsedMessage = {
+      ...parsedMessage,
+      batchMessages: [parsedMessage],
+    };
+    void processModelReplyForMessage(aggregatedMessage).catch(error => {
+      pluginContext.logger.error('Failed to process scheduled group reply', {
+        threadId: parsedMessage.threadInfo.threadId,
+        error,
+      });
+    });
+  }, GROUP_OPEN_REPLY_POLL_MS);
+
+  pendingGroupReplyPolls.set(parsedMessage.groupId, {
+    timer,
+    messages: [parsedMessage],
+  });
 }
 
 async function rememberOutboundMessage(
@@ -1243,38 +1437,20 @@ async function connectWebSocket(): Promise<void> {
             // This enables Alma to receive messages via chat.onMessage()
             await forwardMessageToAlma(parsedMessage);
 
-            let reply: string | null = null;
             if (willRespond) {
-              try {
-                reply = getImageFallbackReply(parsedMessage);
-                if (!reply) {
-                  reply = normalizeGeneratedReply(parsedMessage, await generateAlmaResponse(parsedMessage));
-                }
-                if (!reply && !config.respondToGroupMessage) {
-                  reply = generateReply(parsedMessage);
-                }
-              } catch (error) {
-                pluginContext.logger.error('Failed to generate Alma response', {
-                  threadId: parsedMessage.threadInfo.threadId,
-                  error: error instanceof Error ? {
-                    name: error.name,
-                    message: error.message,
-                    stack: error.stack,
-                  } : error,
-                });
-                reply = buildErrorReply(error);
-              }
-            }
+              const effectiveConfig = getEffectiveConfig(config, parsedMessage.groupId);
+              const shouldPollOpenGroupReply = parsedMessage.messageType === 'group'
+                && effectiveConfig.respondToGroupMessage
+                && !isExplicitGroupTrigger(parsedMessage);
 
-            if (reply) {
-              const strategy = buildReplyStrategy(parsedMessage, reply);
-              if (strategy.delayMs > 0) {
-                await sleep(strategy.delayMs);
+              if (shouldPollOpenGroupReply) {
+                // In open group mode we debounce to the latest message in the active burst
+                // instead of starting a fresh model run for every single line.
+                scheduleOpenGroupReplyPoll(parsedMessage);
+                return;
               }
-              await sendReplyToParsedMessage(parsedMessage, strategy.text, {
-                mentionSender: strategy.mentionSender,
-                quoteMessageId: strategy.quoteMessageId,
-              });
+
+              await processModelReplyForMessage(parsedMessage);
             }
           } catch (error) {
             pluginContext.logger.error('Failed to process QQ message', {
@@ -1499,6 +1675,8 @@ async function requestAlmaResponse(
           if (hasImages && !resolvedImageSource) {
             throw new Error('Image source could not be resolved from NapCat');
           }
+          // Mirror Alma CLI's generate_response payload shape. Keeping this payload minimal
+          // avoids protocol drift and makes Alma-side validation errors easier to reason about.
           const requestPayload = {
             type: 'generate_response',
             data: {
@@ -1508,7 +1686,6 @@ async function requestAlmaResponse(
                 role: 'user',
                 parts: userMessageParts,
               },
-              source: getAlmaRequestSource(parsedMessage),
             },
           };
 
@@ -1533,6 +1710,8 @@ async function requestAlmaResponse(
         const raw = await webSocketDataToText(event?.data);
         const parsed = JSON.parse(raw);
 
+        // Alma streams model output as deltas first, then flips thread_generating to false when
+        // the full pipeline is done. We keep accepting generation_completed for compatibility.
         if (parsed?.type === 'message_delta') {
           const deltas = Array.isArray(parsed?.data?.deltas) ? parsed.data.deltas : [];
           for (const delta of deltas) {
@@ -1556,6 +1735,11 @@ async function requestAlmaResponse(
         }
 
         if (parsed?.type === 'generation_completed') {
+          finish(() => resolve(responseText.trim()));
+          return;
+        }
+
+        if (parsed?.type === 'thread_generating' && parsed?.data?.id === almaThreadId && parsed?.data?.isGenerating === false) {
           finish(() => resolve(responseText.trim()));
           return;
         }
@@ -1585,8 +1769,32 @@ async function requestAlmaResponse(
 }
 
 async function generateAlmaResponse(parsedMessage: ParsedMessage): Promise<string> {
-  const almaThreadId = await ensureAlmaThreadId(parsedMessage);
-  return requestAlmaResponse(parsedMessage, almaThreadId);
+  let almaThreadId = await ensureAlmaThreadId(parsedMessage);
+
+  try {
+    return await requestAlmaResponse(parsedMessage, almaThreadId);
+  } catch (error) {
+    if (!shouldRetryWithFreshAlmaThread(error)) {
+      throw error;
+    }
+
+    // "Invalid message format" is a generic Alma WS error. A fresh thread fixes the common case
+    // where the locally cached Alma thread id no longer points at a valid thread.
+    pluginContext.logger.warn('Retrying Alma response with a fresh thread', {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    writeDebugLog('WARN', 'Retrying Alma response with a fresh thread', {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    await resetAlmaThreadId(parsedMessage);
+    almaThreadId = await ensureAlmaThreadId(parsedMessage);
+    return requestAlmaResponse(parsedMessage, almaThreadId);
+  }
 }
 
 async function sendImage(

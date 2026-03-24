@@ -71,15 +71,28 @@ export function buildGroupHistoryContext(
   options: {
     historyLimit: number;
     charLimit: number;
-    getMessageHistory: (groupId: string, limit: number) => GroupContextMessage[];
+    lookbackSeconds: number;
+    excludeMessageIds?: Set<number>;
+    getMessageHistory: (groupId: string, limit: number, beforeTimestamp?: number) => GroupContextMessage[];
   },
 ): string {
   if (!parsedMessage.groupId) {
     return '';
   }
 
-  const candidateMessages = options.getMessageHistory(parsedMessage.groupId, options.historyLimit * 3)
-    .filter(message => message.messageId !== parsedMessage.messageId);
+  // Group context should represent the conversation immediately before the current message,
+  // not an arbitrary grab-bag of older group traffic.
+  const minTimestamp = parsedMessage.timestamp - options.lookbackSeconds;
+  const candidateMessages = options.getMessageHistory(
+    parsedMessage.groupId,
+    options.historyLimit * 3,
+    parsedMessage.timestamp,
+  ).filter(message =>
+    message.messageId !== parsedMessage.messageId
+    && !options.excludeMessageIds?.has(message.messageId)
+    && message.timestamp < parsedMessage.timestamp
+    && message.timestamp >= minTimestamp,
+  );
 
   const recentMessages = candidateMessages
     .map(message => ({

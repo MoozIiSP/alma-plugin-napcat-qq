@@ -3,9 +3,13 @@ import { ALMA_THREAD_CREATE_TIMEOUT_MS, ALMA_THREAD_WS_URL } from '../core/const
 export type AlmaThreadRecord = {
   id: string;
   title?: string;
+  updatedAt?: string;
+  createdAt?: string;
 };
 
 export function getAlmaApiBaseUrl(): string {
+  // Alma only exposes the thread API base over HTTP; derive it from the fixed WS endpoint
+  // so both transports stay on the same host/port.
   const wsUrl = new URL(ALMA_THREAD_WS_URL);
   wsUrl.protocol = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
   wsUrl.pathname = '';
@@ -46,6 +50,35 @@ export async function createAlmaThread(
     return created;
   } catch (error) {
     deps.logger.error('Failed to create Alma thread', error);
+    throw error;
+  }
+}
+
+export async function listAlmaThreads(
+  limit: number,
+  deps: {
+    writeDebugLog: (level: 'INFO', message: string, extra?: unknown) => void;
+    logger: { error: (message: string, error: unknown) => void };
+  },
+): Promise<AlmaThreadRecord[]> {
+  // Recent-thread listing is enough for our mapping guard because QQ thread mappings should
+  // always point at actively used Alma threads.
+  const endpoint = `${getAlmaApiBaseUrl()}/api/threads?limit=${limit}`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      signal: AbortSignal.timeout(ALMA_THREAD_CREATE_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to list Alma threads: ${response.status} ${response.statusText}`);
+    }
+
+    const threads = await response.json() as AlmaThreadRecord[];
+    return Array.isArray(threads) ? threads : [];
+  } catch (error) {
+    deps.logger.error('Failed to list Alma threads', error);
     throw error;
   }
 }

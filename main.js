@@ -16560,6 +16560,12 @@ class ThreadManager {
       thread.almaThreadId = almaThreadId;
     }
   }
+  clearAlmaThreadId(threadId) {
+    const thread = this.threads.get(threadId);
+    if (thread) {
+      thread.almaThreadId = undefined;
+    }
+  }
   remove(threadId) {
     this.threads.delete(threadId);
   }
@@ -16598,11 +16604,13 @@ var SIDEBAR_VIEW_ID = `${PLUGIN_ID}.runtime-status`;
 var RECONNECT_BASE_DELAY_MS = 1000;
 var RECONNECT_MAX_DELAY_MS = 30000;
 var ALMA_THREAD_CREATE_TIMEOUT_MS = 1e4;
-var ALMA_TEXT_RESPONSE_TIMEOUT_MS = 60000;
-var ALMA_VISION_RESPONSE_TIMEOUT_MS = 90000;
-var ALMA_TASK_RESPONSE_TIMEOUT_MS = 180000;
+var ALMA_TEXT_RESPONSE_TIMEOUT_MS = 180000;
+var ALMA_VISION_RESPONSE_TIMEOUT_MS = 240000;
+var ALMA_TASK_RESPONSE_TIMEOUT_MS = 300000;
 var GROUP_CONTEXT_MESSAGE_LIMIT = 20;
 var GROUP_CONTEXT_CHAR_LIMIT = 4000;
+var GROUP_CONTEXT_LOOKBACK_SECONDS = 15 * 60;
+var GROUP_OPEN_REPLY_POLL_MS = 5000;
 var GROUP_REPLY_DELAY_MENTION_MS = 800;
 var GROUP_REPLY_DELAY_OPEN_MS = 1500;
 var GROUP_REPLY_DELAY_JITTER_MS = 1200;
@@ -16809,7 +16817,8 @@ function buildGroupHistoryContext(parsedMessage, options) {
   if (!parsedMessage.groupId) {
     return "";
   }
-  const candidateMessages = options.getMessageHistory(parsedMessage.groupId, options.historyLimit * 3).filter((message) => message.messageId !== parsedMessage.messageId);
+  const minTimestamp = parsedMessage.timestamp - options.lookbackSeconds;
+  const candidateMessages = options.getMessageHistory(parsedMessage.groupId, options.historyLimit * 3, parsedMessage.timestamp).filter((message) => message.messageId !== parsedMessage.messageId && !options.excludeMessageIds?.has(message.messageId) && message.timestamp < parsedMessage.timestamp && message.timestamp >= minTimestamp);
   const recentMessages = candidateMessages.map((message) => ({
     message,
     score: scoreGroupHistoryMessage(parsedMessage, message)
@@ -17729,6 +17738,23 @@ async function createAlmaThread(title, deps) {
     throw error48;
   }
 }
+async function listAlmaThreads(limit, deps) {
+  const endpoint = `${getAlmaApiBaseUrl()}/api/threads?limit=${limit}`;
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      signal: AbortSignal.timeout(ALMA_THREAD_CREATE_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to list Alma threads: ${response.status} ${response.statusText}`);
+    }
+    const threads = await response.json();
+    return Array.isArray(threads) ? threads : [];
+  } catch (error48) {
+    deps.logger.error("Failed to list Alma threads", error48);
+    throw error48;
+  }
+}
 
 // main.ts
 var pluginContext;
@@ -17747,6 +17773,7 @@ var shouldReconnect = true;
 var pendingRequests = new Map;
 var rateLimitMap = new Map;
 var atCooldownMap = new Map;
+var pendingGroupReplyPolls = new Map;
 var messageHistory = [];
 var messageIndex = new Map;
 var processedMessageIds = new Map;
@@ -18022,14 +18049,21 @@ function sleep(ms) {
 function getSenderLabel2(message) {
   return getSenderLabel(message);
 }
+function formatBatchMessageEntry(message) {
+  const senderLabel = getSenderLabel2(message);
+  return `[${senderLabel} ${message.userId}] ${message.textContent}`.trim();
+}
 function buildGroupHistoryContext2(parsedMessage) {
   const effectiveConfig = getEffectiveConfig(config2, parsedMessage.groupId);
   const historyLimit = Math.max(1, effectiveConfig.groupContextMessageLimit || GROUP_CONTEXT_MESSAGE_LIMIT);
   const charLimit = Math.max(500, effectiveConfig.groupContextCharLimit || GROUP_CONTEXT_CHAR_LIMIT);
+  const excludeMessageIds = parsedMessage.batchMessages ? new Set(parsedMessage.batchMessages.map((message) => message.messageId)) : undefined;
   return buildGroupHistoryContext(parsedMessage, {
     historyLimit,
     charLimit,
-    getMessageHistory: (groupId, limit) => getMessageHistory(groupId, limit)
+    lookbackSeconds: GROUP_CONTEXT_LOOKBACK_SECONDS,
+    excludeMessageIds,
+    getMessageHistory: (groupId, limit, beforeTimestamp) => getMessageHistory(groupId, limit, beforeTimestamp)
   });
 }
 function buildAlmaInputText(parsedMessage) {
@@ -18046,10 +18080,14 @@ function buildAlmaInputText(parsedMessage) {
   if (parsedMessage.messageType !== "group") {
     return imageAwareText;
   }
-  const senderLabel = getSenderLabel2(parsedMessage);
-  const currentMessage = [
+  const batchMessages = parsedMessage.batchMessages?.length ? parsedMessage.batchMessages : [parsedMessage];
+  const currentMessage = batchMessages.length > 1 ? [
+    "当前周期内的新消息：",
+    ...batchMessages.map(formatBatchMessageEntry)
+  ].join(`
+`) : [
     "当前需要回复的消息：",
-    `[${senderLabel} ${parsedMessage.userId}] ${hasImages ? imageAwareText : parsedMessage.textContent}`
+    `[${getSenderLabel2(parsedMessage)} ${parsedMessage.userId}] ${hasImages ? imageAwareText : parsedMessage.textContent}`
   ].join(`
 `);
   if (!effectiveConfig.respondToGroupMessage) {
@@ -18169,9 +18207,6 @@ function normalizeGeneratedReply2(parsedMessage, reply) {
 }
 function getImageFallbackReply2(parsedMessage) {
   return getImageFallbackReply(parsedMessage, getEffectiveConfig(config2, parsedMessage.groupId));
-}
-function getAlmaRequestSource(parsedMessage) {
-  return PLUGIN_ID;
 }
 async function sendReplyToParsedMessage(parsedMessage, reply, options) {
   let atUser;
@@ -18354,15 +18389,70 @@ async function createAlmaThread2(title) {
     logger: pluginContext.logger
   });
 }
+async function listAlmaThreads2(limit) {
+  return listAlmaThreads(limit, {
+    writeDebugLog: writeDebugLog2,
+    logger: pluginContext.logger
+  });
+}
+function buildAlmaThreadTitle(parsedMessage) {
+  return `qq ${parsedMessage.messageType} ${parsedMessage.messageType === "group" ? parsedMessage.groupId : parsedMessage.userId}`;
+}
+function matchesAlmaThreadTitle(parsedMessage, title) {
+  const normalizedTitle = title?.trim();
+  if (!normalizedTitle) {
+    return false;
+  }
+  if (normalizedTitle === parsedMessage.threadInfo.displayName.trim()) {
+    return true;
+  }
+  return normalizedTitle === buildAlmaThreadTitle(parsedMessage);
+}
+async function validateMappedAlmaThread(parsedMessage, almaThreadId) {
+  const threads = await listAlmaThreads2(200);
+  const matchedThread = threads.find((thread) => thread.id === almaThreadId);
+  if (!matchedThread) {
+    writeDebugLog2("WARN", "Mapped Alma thread was not found in recent thread list", {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId
+    });
+    return false;
+  }
+  const valid = matchesAlmaThreadTitle(parsedMessage, matchedThread.title);
+  if (!valid) {
+    writeDebugLog2("WARN", "Mapped Alma thread title did not match QQ thread", {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+      almaTitle: matchedThread.title,
+      expectedTitle: buildAlmaThreadTitle(parsedMessage)
+    });
+  }
+  return valid;
+}
 async function ensureAlmaThreadId(parsedMessage) {
   const thread = threadManager.get(parsedMessage.threadInfo.threadId);
   if (thread?.almaThreadId) {
-    return thread.almaThreadId;
+    const valid = await validateMappedAlmaThread(parsedMessage, thread.almaThreadId);
+    if (valid) {
+      return thread.almaThreadId;
+    }
+    await resetAlmaThreadId(parsedMessage);
   }
-  const created = await createAlmaThread2(parsedMessage.threadInfo.displayName);
+  const created = await createAlmaThread2(buildAlmaThreadTitle(parsedMessage));
   threadManager.setAlmaThreadId(parsedMessage.threadInfo.threadId, created.id);
   schedulePersist();
   return created.id;
+}
+async function resetAlmaThreadId(parsedMessage) {
+  threadManager.clearAlmaThreadId(parsedMessage.threadInfo.threadId);
+  schedulePersist();
+}
+function shouldRetryWithFreshAlmaThread(error48) {
+  if (!(error48 instanceof Error)) {
+    return false;
+  }
+  const message = error48.message.trim().toLowerCase();
+  return message.includes("invalid message format") || message.includes("thread") || message.includes("not found");
 }
 function findReplyTarget(replyToMessageId) {
   if (!replyToMessageId) {
@@ -18370,12 +18460,98 @@ function findReplyTarget(replyToMessageId) {
   }
   return messageIndex.get(replyToMessageId);
 }
-function getMessageHistory(groupId, limit = 10) {
+function getMessageHistory(groupId, limit = 10, beforeTimestamp) {
   let filtered = messageHistory;
   if (groupId) {
     filtered = messageHistory.filter((m) => m.groupId === groupId);
   }
+  if (beforeTimestamp !== undefined) {
+    filtered = filtered.filter((m) => m.timestamp <= beforeTimestamp);
+  }
   return filtered.slice(-limit);
+}
+function isExplicitGroupTrigger(parsedMessage) {
+  return parsedMessage.isAtBot || parsedMessage.triggerTypes.includes("reply_to_bot" /* REPLY_TO_BOT */) || parsedMessage.triggerTypes.includes("command_prefix" /* COMMAND_PREFIX */);
+}
+async function processModelReplyForMessage(parsedMessage) {
+  let reply = null;
+  try {
+    reply = getImageFallbackReply2(parsedMessage);
+    if (!reply) {
+      reply = normalizeGeneratedReply2(parsedMessage, await generateAlmaResponse(parsedMessage));
+    }
+    if (!reply && !config2.respondToGroupMessage) {
+      reply = generateReply2(parsedMessage);
+    }
+  } catch (error48) {
+    pluginContext.logger.error("Failed to generate Alma response", {
+      threadId: parsedMessage.threadInfo.threadId,
+      error: error48 instanceof Error ? {
+        name: error48.name,
+        message: error48.message,
+        stack: error48.stack
+      } : error48
+    });
+    reply = buildErrorReply2(error48);
+  }
+  if (!reply) {
+    return;
+  }
+  const strategy = buildReplyStrategy2(parsedMessage, reply);
+  if (strategy.delayMs > 0) {
+    await sleep(strategy.delayMs);
+  }
+  await sendReplyToParsedMessage(parsedMessage, strategy.text, {
+    mentionSender: strategy.mentionSender,
+    quoteMessageId: strategy.quoteMessageId
+  });
+}
+function scheduleOpenGroupReplyPoll(parsedMessage) {
+  if (!parsedMessage.groupId) {
+    return;
+  }
+  const existing = pendingGroupReplyPolls.get(parsedMessage.groupId);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.messages.push(parsedMessage);
+    const timer2 = setTimeout(() => {
+      pendingGroupReplyPolls.delete(parsedMessage.groupId);
+      const batchedMessages = existing.messages.sort((a, b) => a.timestamp - b.timestamp || a.messageId - b.messageId);
+      const latestMessage = batchedMessages[batchedMessages.length - 1];
+      const aggregatedMessage = {
+        ...latestMessage,
+        batchMessages: batchedMessages
+      };
+      processModelReplyForMessage(aggregatedMessage).catch((error48) => {
+        pluginContext.logger.error("Failed to process scheduled group reply", {
+          threadId: latestMessage.threadInfo.threadId,
+          error: error48
+        });
+      });
+    }, GROUP_OPEN_REPLY_POLL_MS);
+    pendingGroupReplyPolls.set(parsedMessage.groupId, {
+      timer: timer2,
+      messages: existing.messages
+    });
+    return;
+  }
+  const timer = setTimeout(() => {
+    pendingGroupReplyPolls.delete(parsedMessage.groupId);
+    const aggregatedMessage = {
+      ...parsedMessage,
+      batchMessages: [parsedMessage]
+    };
+    processModelReplyForMessage(aggregatedMessage).catch((error48) => {
+      pluginContext.logger.error("Failed to process scheduled group reply", {
+        threadId: parsedMessage.threadInfo.threadId,
+        error: error48
+      });
+    });
+  }, GROUP_OPEN_REPLY_POLL_MS);
+  pendingGroupReplyPolls.set(parsedMessage.groupId, {
+    timer,
+    messages: [parsedMessage]
+  });
 }
 async function rememberOutboundMessage(result, params) {
   const data = result;
@@ -18508,37 +18684,14 @@ async function connectWebSocket() {
             emitPluginEvent(QQ_MESSAGE_EVENTS.MESSAGE_RECEIVED, messageEvent);
             emitPluginEvent("qq.message", parsedMessage);
             await forwardMessageToAlma2(parsedMessage);
-            let reply = null;
             if (willRespond) {
-              try {
-                reply = getImageFallbackReply2(parsedMessage);
-                if (!reply) {
-                  reply = normalizeGeneratedReply2(parsedMessage, await generateAlmaResponse(parsedMessage));
-                }
-                if (!reply && !config2.respondToGroupMessage) {
-                  reply = generateReply2(parsedMessage);
-                }
-              } catch (error48) {
-                pluginContext.logger.error("Failed to generate Alma response", {
-                  threadId: parsedMessage.threadInfo.threadId,
-                  error: error48 instanceof Error ? {
-                    name: error48.name,
-                    message: error48.message,
-                    stack: error48.stack
-                  } : error48
-                });
-                reply = buildErrorReply2(error48);
+              const effectiveConfig = getEffectiveConfig(config2, parsedMessage.groupId);
+              const shouldPollOpenGroupReply = parsedMessage.messageType === "group" && effectiveConfig.respondToGroupMessage && !isExplicitGroupTrigger(parsedMessage);
+              if (shouldPollOpenGroupReply) {
+                scheduleOpenGroupReplyPoll(parsedMessage);
+                return;
               }
-            }
-            if (reply) {
-              const strategy = buildReplyStrategy2(parsedMessage, reply);
-              if (strategy.delayMs > 0) {
-                await sleep(strategy.delayMs);
-              }
-              await sendReplyToParsedMessage(parsedMessage, strategy.text, {
-                mentionSender: strategy.mentionSender,
-                quoteMessageId: strategy.quoteMessageId
-              });
+              await processModelReplyForMessage(parsedMessage);
             }
           } catch (error48) {
             pluginContext.logger.error("Failed to process QQ message", {
@@ -18711,8 +18864,7 @@ async function requestAlmaResponse(parsedMessage, almaThreadId) {
               userMessage: {
                 role: "user",
                 parts: userMessageParts
-              },
-              source: getAlmaRequestSource(parsedMessage)
+              }
             }
           };
           writeDebugLog2("INFO", "Requesting Alma reply", {
@@ -18755,6 +18907,10 @@ async function requestAlmaResponse(parsedMessage, almaThreadId) {
           finish(() => resolve(responseText.trim()));
           return;
         }
+        if (parsed?.type === "thread_generating" && parsed?.data?.id === almaThreadId && parsed?.data?.isGenerating === false) {
+          finish(() => resolve(responseText.trim()));
+          return;
+        }
         if (parsed?.type === "error" || parsed?.type === "generation_error") {
           finish(() => reject(new Error(parsed?.data?.error || "Alma thread WS returned an error")));
           return;
@@ -18777,8 +18933,27 @@ async function requestAlmaResponse(parsedMessage, almaThreadId) {
   });
 }
 async function generateAlmaResponse(parsedMessage) {
-  const almaThreadId = await ensureAlmaThreadId(parsedMessage);
-  return requestAlmaResponse(parsedMessage, almaThreadId);
+  let almaThreadId = await ensureAlmaThreadId(parsedMessage);
+  try {
+    return await requestAlmaResponse(parsedMessage, almaThreadId);
+  } catch (error48) {
+    if (!shouldRetryWithFreshAlmaThread(error48)) {
+      throw error48;
+    }
+    pluginContext.logger.warn("Retrying Alma response with a fresh thread", {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+      error: error48 instanceof Error ? error48.message : String(error48)
+    });
+    writeDebugLog2("WARN", "Retrying Alma response with a fresh thread", {
+      threadId: parsedMessage.threadInfo.threadId,
+      almaThreadId,
+      error: error48 instanceof Error ? error48.message : String(error48)
+    });
+    await resetAlmaThreadId(parsedMessage);
+    almaThreadId = await ensureAlmaThreadId(parsedMessage);
+    return requestAlmaResponse(parsedMessage, almaThreadId);
+  }
 }
 async function sendImage(params, toolContext) {
   const message = [
