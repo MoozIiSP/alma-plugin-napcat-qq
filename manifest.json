@@ -1,0 +1,159 @@
+{
+  "id": "channel-napcat-qq",
+  "name": "QQ NapCat Channel",
+  "version": "1.1.0",
+  "description": "QQ channel integration for Alma. Connects to NapCat/OneBot 11 to send/receive messages, manage groups, and handle @ mentions with intelligent trigger detection.",
+  "author": {
+    "name": "mooziisp",
+    "email": "yuaolni@gmail.com"
+  },
+  "main": "main.js",
+  "engines": {
+    "alma": "^0.1.0"
+  },
+  "type": "integration",
+  "permissions": [
+    "chat:read",
+    "chat:write",
+    "tools:register",
+    "commands:register",
+    "statusbar",
+    "settings",
+    "network:fetch",
+    "network:localhost"
+  ],
+  "activationEvents": [
+    "onStartup"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "id": "channel-napcat-qq.send_private_msg",
+        "name": "Send Private Message",
+        "description": "Send a private message to a QQ user"
+      },
+      {
+        "id": "channel-napcat-qq.send_group_msg",
+        "name": "Send Group Message",
+        "description": "Send a message to a QQ group"
+      },
+      {
+        "id": "channel-napcat-qq.send_image",
+        "name": "Send Image",
+        "description": "Send an image to a QQ user or group"
+      },
+      {
+        "id": "channel-napcat-qq.send_voice",
+        "name": "Send Voice",
+        "description": "Send a voice message to a QQ user or group"
+      },
+      {
+        "id": "channel-napcat-qq.send_file",
+        "name": "Send File",
+        "description": "Send a file to a QQ group"
+      },
+      {
+        "id": "channel-napcat-qq.send_rich_message",
+        "name": "Send Rich Message",
+        "description": "Send a rich QQ message with mixed segments"
+      },
+      {
+        "id": "channel-napcat-qq.send_thread_rich_message",
+        "name": "Send Thread Rich Message",
+        "description": "Send a rich QQ message to a QQ thread"
+      },
+      {
+        "id": "channel-napcat-qq.get_friend_list",
+        "name": "Get Friend List",
+        "description": "Get the list of QQ friends"
+      },
+      {
+        "id": "channel-napcat-qq.get_group_list",
+        "name": "Get Group List",
+        "description": "Get the list of QQ groups"
+      },
+      {
+        "id": "channel-napcat-qq.get_group_members",
+        "name": "Get Group Members",
+        "description": "Get the member list of a QQ group"
+      },
+      {
+        "id": "channel-napcat-qq.delete_message",
+        "name": "Delete Message",
+        "description": "Delete/recall a message"
+      },
+      {
+        "id": "channel-napcat-qq.group_kick",
+        "name": "Group Kick",
+        "description": "Kick a member from a group"
+      },
+      {
+        "id": "channel-napcat-qq.group_ban",
+        "name": "Group Ban",
+        "description": "Ban a member in a group"
+      },
+      {
+        "id": "channel-napcat-qq.set_group_card",
+        "name": "Set Group Card",
+        "description": "Set a member's card/nickname in a group"
+      },
+      {
+        "id": "channel-napcat-qq.get_message_history",
+        "name": "Get Message History",
+        "description": "Get recent message history from a group"
+      }
+    ],
+    "commands": [
+      {
+      "id": "channel-napcat-qq.connect",
+        "title": "Connect to QQ",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.disconnect",
+        "title": "Disconnect from QQ",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.send-private",
+        "title": "Send Private Message",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.send-group",
+        "title": "Send Group Message",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.get-friends",
+        "title": "Get Friend List",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.get-groups",
+        "title": "Get Group List",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.reload-config",
+        "title": "Reload Configuration",
+        "category": "QQ NapCat Channel"
+      },
+      {
+      "id": "channel-napcat-qq.status",
+        "title": "Show Connection Status",
+        "category": "QQ NapCat Channel"
+      }
+    ],
+    "configuration": {
+      "title": "QQ NapCat Channel",
+      "properties": {
+        "qqchannel.configJson": {
+          "type": "string",
+          "default": "{\n  \"napcatWsUrl\": \"ws://127.0.0.1:6099/ws\",\n  \"almaModel\": \"openai:gpt-4o\",\n  \"almaVisionModel\": \"\",\n  \"token\": \"\",\n  \"botQQ\": \"\",\n  \"allowFrom\": [\"private\", \"group:YOUR_GROUP_ID\"],\n  \"respondToDirectMessage\": true,\n  \"respondToGroupMessage\": false,\n  \"respondToAt\": true,\n  \"respondToReply\": true,\n  \"groupContextMessageLimit\": 20,\n  \"groupContextCharLimit\": 4000,\n  \"atReplyEnabled\": true,\n  \"groupPolicies\": {\n    \"YOUR_GROUP_ID\": {\n      \"respondToGroupMessage\": true,\n      \"respondToReply\": true,\n      \"groupContextMessageLimit\": 30,\n      \"atReplyEnabled\": false\n    }\n  }\n}",
+          "description": "JSON configuration for QQ NapCat Channel. botQQ can be left empty and will be auto-detected from NapCat login. almaVisionModel is used for image understanding when incoming messages contain pictures. groupPolicies lets each QQ group override reply strategy independently. Advanced keys such as keywords, rate limits, and custom reply templates are still supported but omitted here. Legacy qqchannel.* keys are still read as fallback."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "alma-plugin-channel-napcat-qq",
+  "version": "1.1.0",
+  "description": "QQ NapCat Channel Plugin for Alma - NapCat/OneBot 11 Integration",
+  "main": "main.js",
+  "scripts": {
+    "build": "bun build main.ts --outfile main.js --target node --format esm",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "zod": "^4.3.6",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "alma-plugin-api": "^0.1.2",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
