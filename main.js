@@ -18169,6 +18169,9 @@ function normalizeGeneratedReply2(parsedMessage, reply) {
 function getImageFallbackReply2(parsedMessage) {
   return getImageFallbackReply(parsedMessage, getEffectiveConfig(config2, parsedMessage.groupId));
 }
+function getAlmaRequestSource(parsedMessage) {
+  return parsedMessage.messageType === "group" ? "telegram-group" : "discord";
+}
 async function sendReplyToParsedMessage(parsedMessage, reply, options) {
   let atUser;
   if (options?.mentionSender && getEffectiveConfig(config2, parsedMessage.groupId).atReplyEnabled && parsedMessage.messageType === "group" && checkAtCooldown2(parsedMessage.userId, parsedMessage.groupId)) {
@@ -18707,7 +18710,8 @@ async function requestAlmaResponse(parsedMessage, almaThreadId) {
               userMessage: {
                 role: "user",
                 parts: userMessageParts
-              }
+              },
+              source: getAlmaRequestSource(parsedMessage)
             }
           };
           writeDebugLog2("INFO", "Requesting Alma reply", {

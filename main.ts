@@ -808,6 +808,10 @@ function getImageFallbackReply(parsedMessage: ParsedMessage): string | null {
   return getImageFallbackReplyBase(parsedMessage, getEffectiveConfig(config, parsedMessage.groupId));
 }
 
+function getAlmaRequestSource(parsedMessage: ParsedMessage): string {
+  return parsedMessage.messageType === 'group' ? 'telegram-group' : 'discord';
+}
+
 async function sendReplyToParsedMessage(
   parsedMessage: ParsedMessage,
   reply: string,
@@ -1503,6 +1507,7 @@ async function requestAlmaResponse(
                 role: 'user',
                 parts: userMessageParts,
               },
+              source: getAlmaRequestSource(parsedMessage),
             },
           };
 
